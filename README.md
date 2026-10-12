@@ -1,6 +1,6 @@
 # Telegram Bot - Checagem de Mensagens e Fatos (Interface Crua)
 
-Bot minimalista para receber mensagens, afirmações ou notícias no Telegram, consultar a API de IA do back-end e retornar o veredito de veracidade de forma crua e direta.
+Bot minimalista para receber mensagens, afirmações ou notícias no Telegram, consultar a API de IA do back-end **FactChkBR** e retornar o veredito de veracidade de forma crua e direta.
 
 ---
 
@@ -19,7 +19,10 @@ Edite com seu token gerado no `@BotFather`:
 ```env
 TELEGRAM_BOT_TOKEN=seu_token_aqui
 BACKEND_API_URL=http://localhost:8000/api/analyze
-USE_MOCK=true
+BACKEND_HEALTH_URL=http://localhost:8000/api/health
+BACKEND_TIMEOUT=60.0
+USE_MOCK=false
+OUTPUT_MODE=raw
 ```
 
 ---
@@ -32,22 +35,35 @@ python bot.py
 
 ---
 
+## 💬 Comandos Disponíveis
+
+* `/start` - Apresenta o bot e instruções iniciais de uso.
+* `/health` - Consulta em tempo real a integridade da API FactChkBR, listando analisadores ativos e latência.
+* `/help` - Guia detalhado de como enviar textos, notícias e links para análise.
+
+---
+
 ## 📤 Formato de Resposta (Crua)
 
-O usuário envia ou encaminha qualquer mensagem (ex: *"Urgente! Governo anuncia confisco da poupança"*). O bot processa e responde:
+O usuário envia ou encaminha qualquer mensagem (ex: *"Existe adesivo emagrecedor com Mounjaro à venda por 39 reais"*). O bot processa e responde:
 
 ```text
-Fato/Texto: Urgente! Governo anuncia confisco da poupança...
-Veredito: FAKE
-Confiança: 93%
-Resumo: Afirmação falsa ou desmentida por agências de checagem.
+Fato/Texto: Existe adesivo emagrecedor com Mounjaro à venda por 39 reais
+Veredito: 🔴 FAKE
+Confiança: 94%
+Resumo: Afirmação falsa ou desmentida por agências de checagem e bases sanitárias.
 Motivos:
-- Linguagem apelativa ou alarmista com pedidos de repasse.
-- Inconsistência factual com dados públicos e órgãos oficiais.
+- Medicamento Mounjaro (tirzepatida) possui administração exclusivamente injetável/subcutânea.
+- Inexistência de aprovação sanitária (Anvisa) para formulações transdérmicas em adesivo.
+- Ausência de registro de preço de 39 reais.
 Fontes:
-- Agência Lupa
-- Aos Fatos
-- Projeto Comprova
+- Anvisa (Portal Oficial)
+- Wikipedia (Ficha Farmacológica Oficial)
+Detalhamento por Alegação:
+- "Existe adesivo de Mounjaro" -> 🔴 FAKE (98%)
+Avaliação de Riscos:
+- Risco de fraude ou comercialização irregular.
+- Risco à saúde por uso de substância clandestina.
 ```
 
 ---
@@ -55,6 +71,7 @@ Fontes:
 ## 📡 Contrato com o Back-end
 
 - **Método:** `POST`
+- **Endpoint:** `/api/analyze` (ou `/api/v1/analyze`)
 - **Payload enviado:**
   ```json
   {
@@ -72,6 +89,18 @@ Fontes:
     "confidence": 0.93,
     "summary": "...",
     "reasons": ["motivo 1", "motivo 2"],
-    "sources": ["fonte 1", "fonte 2"]
+    "sources": ["fonte 1", "fonte 2"],
+    "sub_claims": [],
+    "risks_assessment": []
   }
   ```
+
+---
+
+## 🧪 Testes Automatizados
+
+Para executar os testes automatizados da integração:
+```bash
+pip install -r requirements-dev.txt
+pytest tests/
+```
