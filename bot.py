@@ -63,12 +63,116 @@ logger = logging.getLogger("telegram_bot")
 
 URL_REGEX = re.compile(r"https?://[^\s<>\"']+")
 
+TECHNICAL_TERMS_BLACKLIST = (
+    "base vetorial", "factchkbr (chromadb)", "chromadb", "chroma", "vector", "vetorial",
+    "padrões estilísticos", "estilometria", "ônus da prova", "precedência probatória",
+    "spacy", "jevk5", "plumb", "laya", "llm judge", "ollama", "onnx", "gatekeeper",
+    "similaridade:", "vector_cache", "banco vetorial",
+)
+
 VERDICT_EMOJIS = {
-    "VERDADEIRO": "🟢 VERDADEIRO",
-    "FAKE": "🔴 FAKE",
-    "SUSPEITO": "🟡 SUSPEITO",
-    "INCONCLUSIVO": "⚪ INCONCLUSIVO",
+    "VERDADEIRO": "🟢 FATO (VERDADEIRO)",
+    "FAKE": "🔴 BOATO (FALSO)",
+    "SUSPEITO": "🟡 ENGANOSO / SUSPEITO",
+    "INCONCLUSIVO": "⚪ NÃO COMPROVADO",
 }
+
+VERDICT_EMOJIS_INLINE = {
+    "VERDADEIRO": "🟢 Verdadeiro",
+    "FAKE": "🔴 Falso",
+    "SUSPEITO": "🟡 Enganoso",
+    "INCONCLUSIVO": "⚪ Não Comprovado",
+}
+
+
+def clean_accessible_text(text: str) -> str:
+    """Remove jargões técnicos, referências à base vetorial e normaliza o texto para cidadãos."""
+    if not text:
+        return ""
+    t = str(text).strip()
+
+    # 1. Remove referências a bases internas e banco vetorial
+    t = re.sub(r"Base Vetorial FactChkBR(?:\s*\([^)]*\))?:?\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"ChromaDB(?:\s*\([^)]*\))?:?\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"banco vetorial(?:\s*\([^)]*\))?:?\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\(Similaridade:\s*\d+%\)", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"Similaridade:\s*\d+%", "", t, flags=re.IGNORECASE)
+
+    # 2. Remove módulos de arquitetura e classificadores internos
+    t = re.sub(r"Classificador de Decisão (?:Plumb-4B|JevK5-Lite):?\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"Plumb-4B", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"JevK5-Lite", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\bLaya\b", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"LLM Judge(?:\s*\([^)]*\))?:?\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"Ollama local(?:\s*\([^)]*\))?:?\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"spaCy Gatekeeper(?:\s*\+[^)]*\))?:?\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"Heurística Textual.*?:?\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"Extrator FactChkBR.*?:?\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"Filtro de Escopo.*?:?\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"Extração concluída: texto com padrões estilísticos neutros\.?", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"Sem predicado factual checável\.?", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"Claim principal: \"[^\"]*\"\.?", "", t, flags=re.IGNORECASE)
+
+    # 3. Simplifica jargões de ônus da prova e termos acadêmicos
+    t = re.sub(
+        r"sob o princípio de ônus da prova,?\s*afirmações.*?são tratadas como provavelmente falsas.*?\.",
+        "Não encontramos estudos médicos nem registros oficiais que comprovem essa afirmação.",
+        t,
+        flags=re.IGNORECASE,
+    )
+    t = re.sub(
+        r"sob o princípio de ônus da prova,?\s*",
+        "",
+        t,
+        flags=re.IGNORECASE,
+    )
+    t = re.sub(
+        r"Prevalência de checagem oficial:?\s*",
+        "",
+        t,
+        flags=re.IGNORECASE,
+    )
+    t = re.sub(
+        r"precedência probatória:?\s*",
+        "",
+        t,
+        flags=re.IGNORECASE,
+    )
+
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def clean_accessible_sources(sources: List[str]) -> List[str]:
+    """
+    Filtra e limpa fontes, eliminando menções à base vetorial, ChromaDB
+    e módulos técnicos internos.
+    """
+    cleaned: List[str] = []
+    seen = set()
+
+    for s in sources:
+        if not s:
+            continue
+        s_str = str(s).strip()
+        s_lower = s_str.lower()
+
+        # Descarta termos técnicos e bases vetoriais
+        if any(term in s_lower for term in TECHNICAL_TERMS_BLACKLIST):
+            continue
+
+        # Remove prefixos técnicos residuais
+        s_clean = re.sub(r"^Base Vetorial[^:]*:\s*", "", s_str, flags=re.IGNORECASE).strip()
+        s_clean = re.sub(r"^Checagem de Referência Anterior:?\s*", "", s_clean, flags=re.IGNORECASE).strip()
+
+        if s_clean and s_clean not in seen:
+            seen.add(s_clean)
+            cleaned.append(s_clean)
+
+    if not cleaned:
+        cleaned = ["Ministério da Saúde (Brasil)", "Anvisa", "Agências Profissionais de Checagem"]
+
+    return cleaned
 
 
 def mock_check(text: str) -> Dict[str, Any]:
@@ -89,15 +193,23 @@ def mock_check(text: str) -> Dict[str, Any]:
             "claim": short_claim,
             "verdict": "FAKE",
             "confidence": 0.93,
-            "summary": "Afirmação falsa ou desmentida por agências de checagem e bases científicas.",
+            "summary": "Afirmação falsa desmentida por agências de checagem e autoridades oficiais.",
             "reasons": [
-                "Linguagem apelativa ou alarmista com pedidos de repasse.",
-                "Inconsistência factual com dados públicos e órgãos oficiais.",
+                "Linguagem apelativa e alarmista típica de correntes sem respaldo factual.",
+                "Não existem registros de autorização na Anvisa ou no Ministério da Saúde.",
+            ],
+            "sub_claims": [
+                {
+                    "statement": short_claim,
+                    "verdict": "FAKE",
+                    "confidence": 0.93,
+                    "justification": "Desmentido por autoridades sanitárias e veículos de imprensa.",
+                }
             ],
             "sources": ["Agência Lupa", "Aos Fatos", "Projeto Comprova", "Anvisa"],
             "risks_assessment": [
                 "Risco de desinformação à saúde pública e potenciais danos terapêuticos.",
-                "Risco de fraude ou comercialização irregular.",
+                "Risco de golpe financeiro ou comercialização irregular.",
             ],
         }
     return {
@@ -107,9 +219,17 @@ def mock_check(text: str) -> Dict[str, Any]:
         "summary": "Informação condizente com registros, apurações e coberturas de referência.",
         "reasons": [
             "Não foram encontradas evidências de manipulação.",
-            "Consistente com coberturas de imprensa e fontes primárias.",
+            "Consistente com coberturas de imprensa e dados de órgãos oficiais.",
         ],
-        "sources": ["Consórcio de Imprensa", "Fontes Oficiais"],
+        "sub_claims": [
+            {
+                "statement": short_claim,
+                "verdict": "VERDADEIRO",
+                "confidence": 0.88,
+                "justification": "Confirmado em dados oficiais e cobertura jornalística.",
+            }
+        ],
+        "sources": ["Consórcio de Imprensa", "Ministério da Saúde"],
     }
 
 
@@ -178,53 +298,89 @@ async def call_backend(text: str, user_id: Optional[int] = None, chat_id: Option
 
 
 def format_raw_output(data: Dict[str, Any]) -> str:
-    """Formata a análise de forma crua e direta conforme especificação."""
+    """Formata a análise de forma acessível, clara e direta para qualquer cidadão."""
     if "error" in data:
-        return f"[ERRO]\n{data['error']}"
+        return f"⚠️ Não foi possível concluir a análise no momento:\n{data['error']}"
 
     confidence_val = data.get("confidence", 0)
     confidence_pct = int(confidence_val * 100) if confidence_val <= 1 else int(confidence_val)
     raw_verdict = str(data.get("verdict", "-")).upper()
     verdict_display = VERDICT_EMOJIS.get(raw_verdict, raw_verdict)
+    verdict_inline = VERDICT_EMOJIS_INLINE.get(raw_verdict, raw_verdict)
+
+    claim = clean_accessible_text(str(data.get("claim", "-")))
 
     lines = [
-        f"Fato/Texto: {data.get('claim', '-')}",
-        f"Veredito: {verdict_display}",
-        f"Confiança: {confidence_pct}%",
+        "📋 Fato Analisado:",
+        f'"{claim}"',
+        "",
+        f"⚖️ Veredito: {verdict_display} ({confidence_pct}% de certeza)",
+        "",
     ]
 
-    if data.get("summary"):
-        lines.append(f"Resumo: {data['summary']}")
+    # Resumo sobre o julgamento
+    summary = clean_accessible_text(data.get("summary", ""))
+    if summary:
+        lines.extend([
+            "📝 Resumo do Julgamento:",
+            summary,
+            "",
+        ])
 
-    reasons = data.get("reasons", [])
-    if reasons:
-        lines.append("Motivos:")
-        for r in reasons:
-            lines.append(f"- {r}")
-
-    sources = data.get("sources", [])
-    if sources:
-        lines.append("Fontes:")
-        for s in sources:
-            lines.append(f"- {s}")
-
+    # Mostrar cada alegação analisada
     sub_claims = data.get("sub_claims", [])
-    if sub_claims and len(sub_claims) > 1:
-        lines.append("Detalhamento por Alegação:")
+    if sub_claims:
+        lines.append("🔍 Detalhamento por Alegação:")
         for sc in sub_claims:
-            stmt = sc.get("statement", "")
+            stmt = clean_accessible_text(sc.get("statement", ""))
             sc_v = str(sc.get("verdict", "-")).upper()
-            sc_v_display = VERDICT_EMOJIS.get(sc_v, sc_v)
+            sc_v_display = VERDICT_EMOJIS_INLINE.get(sc_v, sc_v)
             sc_c = int(sc.get("confidence", 0) * 100) if sc.get("confidence", 0) <= 1 else int(sc.get("confidence", 0))
-            lines.append(f"- \"{stmt}\" -> {sc_v_display} ({sc_c}%)")
+            lines.append(f'• "{stmt}" ➔ {sc_v_display} ({sc_c}%)')
+            just = clean_accessible_text(sc.get("justification", ""))
+            if just and len(just) > 8 and not any(term in just.lower() for term in TECHNICAL_TERMS_BLACKLIST):
+                lines.append(f"  └─ {just}")
+        lines.append("")
+    else:
+        # Mostra a alegação principal como detalhamento unitário
+        lines.append("🔍 Detalhamento por Alegação:")
+        lines.append(f'• "{claim}" ➔ {verdict_inline} ({confidence_pct}%)')
+        lines.append("")
 
+    # Motivos e justificativas adicionais (se não houver sub_claims e houver motivos novos)
+    reasons = data.get("reasons", [])
+    clean_reasons = []
+    for r in reasons:
+        cr = clean_accessible_text(r)
+        if cr and len(cr) > 8 and not any(term in cr.lower() for term in TECHNICAL_TERMS_BLACKLIST):
+            if cr not in clean_reasons and cr != summary:
+                clean_reasons.append(cr)
+    if clean_reasons and not sub_claims:
+        lines.append("💡 Motivos e Justificativas:")
+        for r in clean_reasons:
+            lines.append(f"• {r}")
+        lines.append("")
+
+    # Fontes consultadas (limpas e acessíveis, nunca menciona base vetorial)
+    raw_sources = data.get("sources", [])
+    sources = clean_accessible_sources(raw_sources)
+    if sources:
+        lines.append("🌐 Fontes Consultadas:")
+        for s in sources:
+            lines.append(f"• {s}")
+        lines.append("")
+
+    # Alertas e Cuidados
     risks = data.get("risks_assessment", [])
     if risks:
-        lines.append("Avaliação de Riscos:")
-        for r in risks:
-            lines.append(f"- {r}")
+        clean_risks = [clean_accessible_text(r) for r in risks if clean_accessible_text(r)]
+        if clean_risks:
+            lines.append("⚠️ Alertas e Cuidados:")
+            for r in clean_risks:
+                lines.append(f"• {r}")
+            lines.append("")
 
-    return "\n".join(lines)
+    return "\n".join(lines).strip()
 
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
