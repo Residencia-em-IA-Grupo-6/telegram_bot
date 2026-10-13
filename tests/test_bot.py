@@ -12,6 +12,7 @@ from bot import (
     clean_accessible_sources,
     mock_check,
     call_backend,
+    stream_backend_analysis,
     check_backend_health,
 )
 
@@ -224,3 +225,13 @@ async def test_check_backend_health():
         assert health["version"] == "1.0.0"
         assert "latency_ms" in health
         assert len(health["active_analyzers"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_stream_backend_analysis_mock():
+    mock_msg = AsyncMock()
+    with patch("bot.USE_MOCK", True):
+        res = await stream_backend_analysis("Adesivo de Mounjaro emagrece", mock_msg)
+        assert res["verdict"] == "FAKE"
+        assert mock_msg.edit_text.call_count >= 1
+

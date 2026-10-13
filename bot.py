@@ -1,7 +1,10 @@
 import os
 import re
 import time
+import json
+import asyncio
 import logging
+import urllib.parse
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 
@@ -35,6 +38,7 @@ load_env()
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 BACKEND_URL = os.getenv("BACKEND_API_URL", "http://localhost:8000/api/analyze").strip()
+BACKEND_STREAM_URL = os.getenv("BACKEND_STREAM_URL", "http://localhost:8000/api/analyze/stream").strip()
 BACKEND_HEALTH_URL = os.getenv("BACKEND_HEALTH_URL", "http://localhost:8000/api/health").strip()
 BACKEND_TIMEOUT = float(os.getenv("BACKEND_TIMEOUT", "60.0").strip())
 USE_MOCK = os.getenv("USE_MOCK", "false").strip().lower() in ("true", "1", "yes")
@@ -92,9 +96,9 @@ def clean_accessible_text(text: str) -> str:
     t = str(text).strip()
 
     # 1. Remove referências a bases internas e banco vetorial
-    t = re.sub(r"Base Vetorial FactChkBR(?:\s*\([^)]*\))?:?\s*", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"ChromaDB(?:\s*\([^)]*\))?:?\s*", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"banco vetorial(?:\s*\([^)]*\))?:?\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?:,\s*)?(?:e\s+)?(?:a\s+|pela\s+|pelo\s+|na\s+|no\s+)?Base Vetorial FactChkBR(?:\s*\([^)]*\))?:?\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?:,\s*)?(?:e\s+)?(?:a\s+|pela\s+|pelo\s+|na\s+|no\s+)?ChromaDB(?:\s*\([^)]*\))?:?\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?:,\s*)?(?:e\s+)?(?:a\s+|pela\s+|pelo\s+|na\s+|no\s+)?banco vetorial(?:\s*\([^)]*\))?:?\s*", "", t, flags=re.IGNORECASE)
     t = re.sub(r"\(Similaridade:\s*\d+%\)", "", t, flags=re.IGNORECASE)
     t = re.sub(r"Similaridade:\s*\d+%", "", t, flags=re.IGNORECASE)
 
@@ -139,14 +143,47 @@ def clean_accessible_text(text: str) -> str:
         flags=re.IGNORECASE,
     )
 
+    t = re.sub(r"\b(?:e\s+pela|e\s+pelo)\s*,", ",", t, flags=re.IGNORECASE)
+    t = re.sub(r",\s*,+", ",", t)
+    t = re.sub(r",\s*\.", ".", t)
     t = re.sub(r"\s+", " ", t).strip()
     return t
+
+
+HOMEPAGE_PATHS = {
+    "", "/", "/estadao-verifica", "/estadao-verifica/", "/fato-ou-fake", "/fato-ou-fake/",
+    "/confere", "/confere/", "/saude/pt-br", "/saude/pt-br/", "/anvisa/pt-br", "/anvisa/pt-br/",
+    "/pt", "/pt/", "/pt-br", "/pt-br/", "/saude", "/saude/", "/anvisa", "/anvisa/",
+}
+
+
+def is_homepage_url(url: str) -> bool:
+    """Verifica se uma URL aponta para a página inicial de um portal ou seção raiz genérica."""
+    if not url or not url.startswith("http"):
+        return True
+    try:
+        parsed = urllib.parse.urlparse(url.rstrip("/"))
+        path = parsed.path.rstrip("/")
+        if not path or path in HOMEPAGE_PATHS:
+            return True
+        parts = [p for p in path.split("/") if p]
+        if not parts:
+            return True
+        if parts[0] in ("estadao-verifica", "fato-ou-fake", "confere") and len(parts) <= 1:
+            return True
+        if "gov.br" in parsed.netloc:
+            if parts in (["saude", "pt-br"], ["anvisa", "pt-br"], ["saude"], ["anvisa"], ["pt-br"]):
+                return True
+        return False
+    except Exception:
+        return True
 
 
 def clean_accessible_sources(sources: List[str]) -> List[str]:
     """
     Filtra e limpa fontes, eliminando menções à base vetorial, ChromaDB
-    e módulos técnicos internos.
+    e módulos técnicos internos, e gerando links clicáveis diretos APENAS
+    para matérias e artigos completos (rejeitando páginas iniciais).
     """
     cleaned: List[str] = []
     seen = set()
@@ -165,12 +202,32 @@ def clean_accessible_sources(sources: List[str]) -> List[str]:
         s_clean = re.sub(r"^Base Vetorial[^:]*:\s*", "", s_str, flags=re.IGNORECASE).strip()
         s_clean = re.sub(r"^Checagem de Referência Anterior:?\s*", "", s_clean, flags=re.IGNORECASE).strip()
 
-        if s_clean and s_clean not in seen:
-            seen.add(s_clean)
-            cleaned.append(s_clean)
+        # Extrai URL do artigo se existir
+        url_match = URL_REGEX.search(s_clean)
+        if url_match:
+            url = url_match.group(0).rstrip(".,;)")
+            # Rejeita páginas iniciais de sites/portais
+            if is_homepage_url(url):
+                continue
+            if url in seen:
+                continue
+            seen.add(url)
+            title_part = s_clean[:url_match.start()].rstrip(" -|:—").strip()
+            if not title_part:
+                title_part = s_clean[url_match.end():].lstrip(" -|:—").strip()
+            if not title_part:
+                title_part = "Artigo / Matéria Completa"
+            cleaned.append(f"{title_part}\n  🔗 {url}")
+        else:
+            if s_clean and s_clean not in seen and not any(ign in s_clean.lower() for ign in ("nenhuma", "ausência")):
+                seen.add(s_clean)
+                cleaned.append(s_clean)
 
     if not cleaned:
-        cleaned = ["Ministério da Saúde (Brasil)", "Anvisa", "Agências Profissionais de Checagem"]
+        cleaned = [
+            "Ministério da Saúde (Brasil)",
+            "Anvisa",
+        ]
 
     return cleaned
 
@@ -361,11 +418,15 @@ def format_raw_output(data: Dict[str, Any]) -> str:
             lines.append(f"• {r}")
         lines.append("")
 
-    # Fontes consultadas (limpas e acessíveis, nunca menciona base vetorial)
+    # Fontes consultadas (limpas e acessíveis, nunca menciona base vetorial nem páginas iniciais)
     raw_sources = data.get("sources", [])
     sources = clean_accessible_sources(raw_sources)
     if sources:
-        lines.append("🌐 Fontes Consultadas:")
+        has_links = any("🔗" in s for s in sources)
+        if has_links:
+            lines.append("🌐 Fontes Consultadas (clique no link para acessar o artigo):")
+        else:
+            lines.append("🌐 Fontes Consultadas:")
         for s in sources:
             lines.append(f"• {s}")
         lines.append("")
@@ -433,6 +494,100 @@ async def health_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await status_msg.edit_text(text, parse_mode="Markdown")
 
 
+async def stream_backend_analysis(
+    text: str,
+    status_msg: Any,
+    user_id: Optional[int] = None,
+    chat_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Consome o endpoint de streaming do back-end com atualizações progressivas na tela."""
+    if USE_MOCK:
+        await asyncio.sleep(0.4)
+        try:
+            await status_msg.edit_text("🔍 *FactChkBR:* Identificando alegação fática...", parse_mode="Markdown")
+            await asyncio.sleep(0.6)
+            await status_msg.edit_text("🌐 *FactChkBR:* Consultando bases biomédicas (PubMed) e checagens...", parse_mode="Markdown")
+            await asyncio.sleep(0.5)
+        except Exception:
+            pass
+        return mock_check(text)
+
+    if httpx is None:
+        return {"error": "Biblioteca 'httpx' não instalada."}
+
+    urls: List[str] = [u.rstrip(".,;!?") for u in URL_REGEX.findall(text)]
+    payload = {
+        "text": text,
+        "urls": urls,
+        "user_id": user_id,
+        "chat_id": chat_id,
+    }
+
+    final_result: Optional[Dict[str, Any]] = None
+
+    try:
+        async with httpx.AsyncClient(timeout=BACKEND_TIMEOUT) as client:
+            async with client.stream("POST", BACKEND_STREAM_URL, json=payload) as response:
+                if response.status_code != 200:
+                    logger.warning("Stream retornou HTTP %d; executando fallback direto.", response.status_code)
+                    return await call_backend(text, user_id=user_id, chat_id=chat_id)
+
+                current_claim = ""
+                async for line in response.aiter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    raw_json = line[len("data:"):].strip()
+                    if not raw_json:
+                        continue
+                    try:
+                        event = json.loads(raw_json)
+                    except Exception:
+                        continue
+
+                    ev_type = event.get("type")
+                    if ev_type == "step":
+                        step_name = event.get("step")
+                        if step_name == "claim_extractor":
+                            current_claim = event.get("claim", "")
+                            disp_claim = current_claim[:70] + "..." if len(current_claim) > 70 else current_claim
+                            try:
+                                await status_msg.edit_text(
+                                    f"📋 *Alegação identificada:*\n_{disp_claim}_\n\n⏳ _Consultando bases científicas (PubMed, Anvisa) e agências de checagem..._",
+                                    parse_mode="Markdown",
+                                )
+                            except Exception:
+                                pass
+                        elif step_name == "fact_check_api":
+                            disp_claim = current_claim[:70] + "..." if len(current_claim) > 70 else current_claim
+                            ev_count = event.get("evidences_count", 0)
+                            try:
+                                await status_msg.edit_text(
+                                    f"📋 *Alegação identificada:*\n_{disp_claim}_\n\n🌐 _Bases científicas consultadas ({ev_count} registro(s) localizado(s))._\n⚖️ _Consolidando julgamento e avaliando riscos..._",
+                                    parse_mode="Markdown",
+                                )
+                            except Exception:
+                                pass
+                    elif ev_type == "complete":
+                        final_result = event.get("data", {})
+                    elif ev_type == "error":
+                        return {"error": event.get("error", "Erro durante a análise")}
+
+        if final_result:
+            return final_result
+
+    except httpx.ConnectError:
+        return {
+            "error": (
+                f"Não foi possível conectar ao back-end em '{BACKEND_URL}'. "
+                "Verifique se o servidor FactChkBR está rodando."
+            )
+        }
+    except Exception as exc:
+        logger.warning("Exceção no stream (%s): %s", BACKEND_STREAM_URL, exc)
+
+    return await call_backend(text, user_id=user_id, chat_id=chat_id)
+
+
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
     if not message:
@@ -455,15 +610,15 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except Exception:
             pass
 
-    status_msg = await message.reply_text("🔍 Analisando mensagem no FactChkBR...")
-    result = await call_backend(text, user_id=user_id, chat_id=chat_id)
+    status_msg = await message.reply_text("🔍 FactChkBR: Iniciando análise da mensagem...")
+    result = await stream_backend_analysis(text, status_msg, user_id=user_id, chat_id=chat_id)
 
     # Se modo rich estiver habilitado e houver texto HTML do backend
     if OUTPUT_MODE == "rich" and result.get("telegram_formatted_text") and "error" not in result:
-        await status_msg.edit_text(result["telegram_formatted_text"], parse_mode="HTML")
+        await status_msg.edit_text(result["telegram_formatted_text"], parse_mode="HTML", disable_web_page_preview=True)
     else:
         formatted = format_raw_output(result)
-        await status_msg.edit_text(formatted)
+        await status_msg.edit_text(formatted, disable_web_page_preview=True)
 
 
 def main() -> None:
